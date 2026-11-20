@@ -9,10 +9,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version: stable
-
       - name: Siapkan input
         run: |
           mkdir -p wad report out
@@ -24,48 +20,51 @@ jobs:
           echo "Jumlah file .wad_psp2: $count"
           [ "$count" -gt 0 ] || { echo "Tidak ada file .wad_psp2"; exit 1; }
 
-      - name: Build tools
+      - name: Parser WAD sendiri
         run: |
-          git clone --depth 1 https://github.com/mogaika/god_of_war_browser.git gowb
-          cd gowb
-          go build -o ../wadunpack ./tools/wadunpack
-          go build -o ../gowb-server .
-          cd ..
-          ls -l wadunpack gowb-server
+          cat > /tmp/parse.py <<'EOF'
+          import os, re, struct, sys, glob
 
-      - name: Ekstrak dengan wadunpack
-        continue-on-error: true
-        run: |
-          for f in wad/*.wad_psp2; do
-            n=$(basename "$f" .wad_psp2)
-            mkdir -p "out/$n"
-            echo "### $n" >> report/extract-log.txt
-            ./wadunpack -wad "$f" -out "out/$n" >> report/extract-log.txt 2>&1 || echo "GAGAL: $n" >> report/extract-log.txt
-          done
+          def clean(b):
+              s = b.split(b"\0")[0].decode("latin-1", "replace")
+              return re.sub(r"[^A-Za-z0-9_.\-]", "_", s) or "noname"
+
+          index_lines = []
+          for path in sorted(glob.glob("wad/*.wad_psp2")):
+              base = os.path.basename(path)[:-len(".wad_psp2")]
+              data = open(path, "rb").read()
+              outdir = os.path.join("out", base)
+              os.makedirs(outdir, exist_ok=True)
+              off, idx, n = 0, 0, len(data)
+              rows = ["offset\ttag\tflags\tsize\tname\thead32"]
+              status = "OK"
+              while off + 32 <= n:
+                  tag, flags, size = struct.unpack_from("<HHI", data, off)
+                  name = clean(data[off + 8: off + 32])
+                  start = off + 32
+                  if start + size > n:
+                      status = "STOP: size %d melebihi file di offset 0x%x" % (size, off)
+                      break
+                  blob = data[start:start + size]
+                  rows.append("0x%x\t0x%x\t0x%x\t%d\t%s\t%s" % (
+                      off, tag, flags, size, name, blob[:32].hex()))
+                  if size > 0:
+                      fn = "%04d_t%02x_%s.bin" % (idx, tag, name)
+                      open(os.path.join(outdir, fn), "wb").write(blob)
+                  idx += 1
+                  off = (start + size + 15) & ~15
+              open(os.path.join(outdir, "_index.tsv"), "w").write("\n".join(rows))
+              index_lines.append("%s: %d entry, sisa byte %d, %s" % (base, idx, n - off, status))
+          open("report/parse-ringkasan.txt", "w").write("\n".join(index_lines))
+          print("\n".join(index_lines))
+          EOF
+          python3 /tmp/parse.py
           find out -type f | wc -l | tee report/jumlah-hasil.txt
-          find out -type f | head -n 300 > report/daftar-hasil.txt
-          du -sh out | tee -a report/jumlah-hasil.txt
+          find out -type f -name '*.bin' | head -n 300 > report/daftar-hasil.txt
 
-      - name: Jalankan browser server (discovery)
-        continue-on-error: true
+      - name: Ringkasan entry texture
         run: |
-          mkdir -p wadrun
-          for f in wad/*.wad_psp2; do
-            n=$(basename "$f" .wad_psp2 | tr a-z A-Z)
-            cp "$f" "wadrun/$n.WAD"
-          done
-          cd gowb
-          for v in 1 2; do
-            ../gowb-server -dir ../wadrun -ps psvita -gowversion $v -i 127.0.0.1:8000 > ../report/server-v$v.log 2>&1 &
-            pid=$!
-            sleep 8
-            curl -s http://127.0.0.1:8000/ -o ../report/index-v$v.html || true
-            curl -s http://127.0.0.1:8000/json/fs -o ../report/fs-v$v.json || true
-            curl -s http://127.0.0.1:8000/json/pack -o ../report/pack-v$v.json || true
-            curl -s http://127.0.0.1:8000/json/pack/R_WEAPON0_0.WAD -o ../report/pack-weapon0_0-v$v.json || true
-            kill $pid 2>/dev/null || true
-            sleep 2
-          done
+          grep -hiE 'GFX|TXR|PAL|TEX' out/r_weapon0_0/_index.tsv | head -n 40 | tee report/contoh-texture.txt
 
       - uses: actions/upload-artifact@v4
         if: always()
