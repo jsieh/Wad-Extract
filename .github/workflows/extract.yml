@@ -1,0 +1,64 @@
+name: Extract wad_psp2
+
+on:
+  workflow_dispatch:
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      # Taruh file di folder wad/ ATAU upload satu file wad.zip di root repo
+      - name: Siapkan input
+        run: |
+          mkdir -p wad report out
+          if [ -f wad.zip ]; then unzip -oj wad.zip -d wad; fi
+          ls -l wad | tee report/file-list.txt
+          count=$(ls wad/*.wad_psp2 2>/dev/null | wc -l)
+          echo "Jumlah file .wad_psp2: $count"
+          [ "$count" -gt 0 ] || { echo "Tidak ada file .wad_psp2"; exit 1; }
+
+      # Laporan header: dipakai untuk menganalisis format kalau tool gagal
+      - name: Inspeksi header
+        run: |
+          for f in wad/*.wad_psp2; do
+            echo "=== $f ($(stat -c %s "$f") bytes) ==="
+            xxd "$f" | head -n 16
+            echo "--- strings ---"
+            strings -n 6 "$f" | head -n 20
+            echo
+          done > report/inspect.txt
+
+      - name: Build wadunpack (god_of_war_browser)
+        run: |
+          git clone --depth 1 https://github.com/mogaika/god_of_war_browser.git gowb
+          cd gowb
+          go build -o ../wadunpack ./tools/wadunpack
+          cd ..
+          ./wadunpack -h 2>&1 | tee report/wadunpack-help.txt || true
+
+      # Urutan argumen (file, folder_tujuan) belum diverifikasi.
+      # Cek report/wadunpack-help.txt kalau hasilnya kosong.
+      - name: Coba ekstrak
+        continue-on-error: true
+        run: |
+          for f in wad/*.wad_psp2; do
+            n=$(basename "$f" .wad_psp2)
+            mkdir -p "out/$n"
+            echo "### $n" >> report/extract-log.txt
+            ./wadunpack "$f" "out/$n" >> report/extract-log.txt 2>&1 \
+              || echo "GAGAL: $n" >> report/extract-log.txt
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hasil-ekstrak
+          path: |
+            out/
+            report/
