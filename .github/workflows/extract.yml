@@ -17,16 +17,37 @@ jobs:
       - name: Siapkan input
         run: |
           mkdir -p wad report out
-          if [ -f wad.zip ]; then unzip -oj wad.zip -d wad; fi
-          ls -l wad | tee report/file-list.txt
-          count=$(ls wad/*.wad_psp2 2>/dev/null | wc -l)
-          echo "Jumlah file .wad_psp2: $count"
-          [ "$count" -gt 0 ] || { echo "Tidak ada file .wad_psp2"; exit 1; }
 
+          echo "=== BRANCH ==="
+          git branch --show-current
+
+          echo "=== FILE ROOT ==="
+          ls -lah
+
+          echo "=== CARI WAD ==="
+          find . -type f -iname "*.wad_psp2" -print
+
+          find . -type f -iname "*.wad_psp2" \
+            -exec cp -n {} wad/ \;
+
+          if [ -f wad.zip ]; then
+            unzip -oj wad.zip -d wad
+          fi
+
+          echo "=== FILE WAD ==="
+          ls -lah wad
+
+          count=$(find wad -maxdepth 1 -type f -iname "*.wad_psp2" | wc -l)
+
+          [ "$count" -gt 0 ] || {
+            echo "ERROR: WAD tidak ditemukan!"
+            exit 1
+          }
+          
       # Laporan header: dipakai untuk menganalisis format kalau tool gagal
       - name: Inspeksi header
         run: |
-          for f in *wad_psp2; do
+          for f in wad/*.wad_psp2; do
             echo "=== $f ($(stat -c %s "$f") bytes) ==="
             xxd "$f" | head -n 16
             echo "--- strings ---"
@@ -47,8 +68,8 @@ jobs:
       - name: Coba ekstrak
         continue-on-error: true
         run: |
-          for f in wad/*wad_psp2; do
-            n=$(basename "$f" wad_psp2)
+          for f in wad/*.wad_psp2; do
+            n=$(basename "$f" .wad_psp2)
             mkdir -p "out/$n"
             echo "### $n" >> report/extract-log.txt
             ./wadunpack "$f" "out/$n" >> report/extract-log.txt 2>&1 \
