@@ -1,4 +1,4 @@
-name: Extract wad_psp2
+name: Extract wad_psp2 ke PNG
 
 on:
   workflow_dispatch:
@@ -11,65 +11,169 @@ jobs:
 
       - name: Siapkan input
         run: |
-          mkdir -p wad report out
+          mkdir -p wad report png png_unik
           if [ -f wad.zip ]; then unzip -oj wad.zip -d wad; fi
           find . -path ./wad -prune -o -path ./.git -prune -o -type f -iname '*.wad_psp2' -print0 \
             | xargs -0 -r -I{} cp -n "{}" wad/
-          ls -l wad | tee report/file-list.txt
           count=$(find wad -type f -iname '*.wad_psp2' | wc -l)
           echo "Jumlah file .wad_psp2: $count"
           [ "$count" -gt 0 ] || { echo "Tidak ada file .wad_psp2"; exit 1; }
 
-      - name: Parser WAD sendiri
+      - name: Tulis decoder GXT
         run: |
-          cat > /tmp/parse.py <<'EOF'
-          import os, re, struct, sys, glob
+          cat > gxt.py <<'EOF'
+          import struct, zlib
+
+          def part1(n):
+              n &= 0xffff
+              n = (n | (n << 8)) & 0x00FF00FF
+              n = (n | (n << 4)) & 0x0F0F0F0F
+              n = (n | (n << 2)) & 0x33333333
+              n = (n | (n << 1)) & 0x55555555
+              return n
+
+          def morton(x, y):
+              return part1(y) | (part1(x) << 1)
+
+          def unswizzle_blocks(raw, bw, bh, bsize):
+              m = min(bw, bh)
+              out = bytearray(bw * bh * bsize)
+              for y in range(bh):
+                  for x in range(bw):
+                      if bw >= bh:
+                          tile, tx, ty = x // m, x % m, y
+                      else:
+                          tile, tx, ty = y // m, x, y % m
+                      idx = tile * m * m + morton(tx, ty)
+                      s = idx * bsize
+                      d = (y * bw + x) * bsize
+                      out[d:d + bsize] = raw[s:s + bsize]
+              return bytes(out)
+
+          def c565(c):
+              r = (c >> 11) & 31; g = (c >> 5) & 63; b = c & 31
+              return ((r << 3) | (r >> 2), (g << 2) | (g >> 4), (b << 3) | (b >> 2))
+
+          def decode_dxt(blocks, w, h, dxt5):
+              bsize = 16 if dxt5 else 8
+              bw, bh = w // 4, h // 4
+              rgba = bytearray(w * h * 4)
+              for by in range(bh):
+                  for bx in range(bw):
+                      o = (by * bw + bx) * bsize
+                      alpha = [255] * 16
+                      if dxt5:
+                          a0, a1 = blocks[o], blocks[o + 1]
+                          bits = int.from_bytes(blocks[o + 2:o + 8], "little")
+                          if a0 > a1:
+                              pal = [a0, a1] + [((7 - i) * a0 + i * a1) // 7 for i in range(1, 7)]
+                          else:
+                              pal = [a0, a1] + [((5 - i) * a0 + i * a1) // 5 for i in range(1, 5)] + [0, 255]
+                          alpha = [pal[(bits >> (3 * i)) & 7] for i in range(16)]
+                          o += 8
+                      c0, c1 = struct.unpack_from("<HH", blocks, o)
+                      idxs = struct.unpack_from("<I", blocks, o + 4)[0]
+                      p0, p1 = c565(c0), c565(c1)
+                      if c0 > c1 or dxt5:
+                          p2 = tuple((2 * p0[i] + p1[i]) // 3 for i in range(3))
+                          p3 = tuple((p0[i] + 2 * p1[i]) // 3 for i in range(3))
+                          a3 = 255
+                      else:
+                          p2 = tuple((p0[i] + p1[i]) // 2 for i in range(3))
+                          p3 = (0, 0, 0)
+                          a3 = 0
+                      cols = [p0, p1, p2, p3]
+                      for i in range(16):
+                          k = (idxs >> (2 * i)) & 3
+                          r, g, b = cols[k]
+                          a = alpha[i] if dxt5 else (a3 if (k == 3 and not (c0 > c1)) else 255)
+                          px, py = bx * 4 + (i & 3), by * 4 + (i >> 2)
+                          d = (py * w + px) * 4
+                          rgba[d:d + 4] = bytes((r, g, b, a))
+              return bytes(rgba)
+
+          def write_png(path, w, h, rgba):
+              raw = b"".join(b"\x00" + rgba[y * w * 4:(y + 1) * w * 4] for y in range(h))
+              def chunk(t, d):
+                  c = struct.pack(">I", len(d)) + t + d
+                  return c + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+              png = (b"\x89PNG\r\n\x1a\n"
+                     + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
+                     + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
+              open(path, "wb").write(png)
+
+          def gxt_to_rgba(blob):
+              i = blob.find(b"GXT\0")
+              if i < 0:
+                  return None
+              g = blob[i:]
+              toff, tsize, pal, flags, ttype, fmt, w, h, mips = struct.unpack_from("<IIIIIIHHH", g, 0x20)
+              if ttype != 0 or fmt not in (0x85000000, 0x87000000):
+                  raise ValueError("format belum didukung type=%x fmt=%x" % (ttype, fmt))
+              dxt5 = fmt == 0x87000000
+              bsize = 16 if dxt5 else 8
+              bw, bh = w // 4, h // 4
+              raw = g[toff:toff + bw * bh * bsize]
+              return w, h, decode_dxt(unswizzle_blocks(raw, bw, bh, bsize), w, h, dxt5)
+          EOF
+
+      - name: Pecah WAD dan konversi tekstur ke PNG
+        run: |
+          cat > run.py <<'EOF'
+          import glob, hashlib, os, re, struct
+          from gxt import gxt_to_rgba, write_png
 
           def clean(b):
               s = b.split(b"\0")[0].decode("latin-1", "replace")
-              return re.sub(r"[^A-Za-z0-9_.\-]", "_", s) or "noname"
+              return re.sub(r"[^A-Za-z0-9_.\-]", "_", s).strip("_") or "noname"
 
-          index_lines = []
+          seen = {}
+          log = []
+          total = 0
           for path in sorted(glob.glob("wad/*.wad_psp2")):
               base = os.path.basename(path)[:-len(".wad_psp2")]
               data = open(path, "rb").read()
-              outdir = os.path.join("out", base)
-              os.makedirs(outdir, exist_ok=True)
+              os.makedirs("png/" + base, exist_ok=True)
               off, idx, n = 0, 0, len(data)
-              rows = ["offset\ttag\tflags\tsize\tname\thead32"]
-              status = "OK"
+              last_gfx = None
               while off + 32 <= n:
                   tag, flags, size = struct.unpack_from("<HHI", data, off)
                   name = clean(data[off + 8: off + 32])
                   start = off + 32
                   if start + size > n:
-                      status = "STOP: size %d melebihi file di offset 0x%x" % (size, off)
+                      log.append("%s: STOP di 0x%x" % (base, off))
                       break
                   blob = data[start:start + size]
-                  rows.append("0x%x\t0x%x\t0x%x\t%d\t%s\t%s" % (
-                      off, tag, flags, size, name, blob[:32].hex()))
-                  if size > 0:
-                      fn = "%04d_t%02x_%s.bin" % (idx, tag, name)
-                      open(os.path.join(outdir, fn), "wb").write(blob)
+                  if name.startswith("GFX_"):
+                      last_gfx = name[4:]
+                  if blob.find(b"GXT\0") >= 0 and size > 64:
+                      try:
+                          w, h, rgba = gxt_to_rgba(blob)
+                          label = last_gfx or name
+                          fn = "%04d_%s.png" % (idx, label)
+                          write_png("png/%s/%s" % (base, fn), w, h, rgba)
+                          total += 1
+                          hs = hashlib.md5(rgba).hexdigest()
+                          if hs not in seen:
+                              seen[hs] = 1
+                              write_png("png_unik/%s_%s" % (base, fn), w, h, rgba)
+                          log.append("OK   %s %s %dx%d" % (base, fn, w, h))
+                      except Exception as e:
+                          log.append("GAGAL %s idx=%d %s" % (base, idx, e))
                   idx += 1
                   off = (start + size + 15) & ~15
-              open(os.path.join(outdir, "_index.tsv"), "w").write("\n".join(rows))
-              index_lines.append("%s: %d entry, sisa byte %d, %s" % (base, idx, n - off, status))
-          open("report/parse-ringkasan.txt", "w").write("\n".join(index_lines))
-          print("\n".join(index_lines))
+          log.append("TOTAL PNG: %d, UNIK: %d" % (total, len(seen)))
+          open("report/konversi-log.txt", "w").write("\n".join(log))
+          print(log[-1])
           EOF
-          python3 /tmp/parse.py
-          find out -type f | wc -l | tee report/jumlah-hasil.txt
-          find out -type f -name '*.bin' | head -n 300 > report/daftar-hasil.txt
-
-      - name: Ringkasan entry texture
-        run: |
-          grep -hiE 'GFX|TXR|PAL|TEX' out/r_weapon0_0/_index.tsv | head -n 40 | tee report/contoh-texture.txt
+          python3 run.py
+          grep -c '^GAGAL' report/konversi-log.txt || true
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: hasil-ekstrak
+          name: hasil-png
           path: |
-            out/
+            png_unik/
+            png/
             report/
