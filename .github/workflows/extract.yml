@@ -13,38 +13,17 @@ jobs:
         with:
           go-version: stable
 
-      # Taruh file di folder wad/ ATAU upload satu file wad.zip di root repo
+      # File boleh di root repo, di folder wad/, atau di dalam wad.zip
       - name: Siapkan input
         run: |
           mkdir -p wad report out
+          if [ -f wad.zip ]; then unzip -oj wad.zip -d wad; fi
+          cp -n ./*.wad_psp2 wad/ 2>/dev/null || true
+          ls -l wad | tee report/file-list.txt
+          count=$(ls wad/*.wad_psp2 2>/dev/null | wc -l)
+          echo "Jumlah file .wad_psp2: $count"
+          [ "$count" -gt 0 ] || { echo "Tidak ada file .wad_psp2"; exit 1; }
 
-          echo "=== BRANCH ==="
-          git branch --show-current
-
-          echo "=== FILE ROOT ==="
-          ls -lah
-
-          echo "=== CARI WAD ==="
-          find . -type f -iname "*.wad_psp2" -print
-
-          find . -type f -iname "*.wad_psp2" \
-            -exec cp -n {} wad/ \;
-
-          if [ -f wad.zip ]; then
-            unzip -oj wad.zip -d wad
-          fi
-
-          echo "=== FILE WAD ==="
-          ls -lah wad
-
-          count=$(find wad -maxdepth 1 -type f -iname "*.wad_psp2" | wc -l)
-
-          [ "$count" -gt 0 ] || {
-            echo "ERROR: WAD tidak ditemukan!"
-            exit 1
-          }
-          
-      # Laporan header: dipakai untuk menganalisis format kalau tool gagal
       - name: Inspeksi header
         run: |
           for f in wad/*.wad_psp2; do
@@ -56,25 +35,37 @@ jobs:
           done > report/inspect.txt
 
       - name: Build wadunpack (god_of_war_browser)
+        continue-on-error: true
         run: |
           git clone --depth 1 https://github.com/mogaika/god_of_war_browser.git gowb
           cd gowb
-          go build -o ../wadunpack ./tools/wadunpack
+          ls -R tools | tee ../report/tools-list.txt
+          go build -o ../wadunpack ./tools/wadunpack 2>&1 | tee ../report/build-log.txt
           cd ..
+          ls -l wadunpack || echo "wadunpack TIDAK terbuild" | tee -a report/build-log.txt
           ./wadunpack -h 2>&1 | tee report/wadunpack-help.txt || true
 
-      # Urutan argumen (file, folder_tujuan) belum diverifikasi.
-      # Cek report/wadunpack-help.txt kalau hasilnya kosong.
+      # Coba dua urutan argumen, simpan semua output ke log
       - name: Coba ekstrak
         continue-on-error: true
         run: |
+          [ -x ./wadunpack ] || { echo "wadunpack tidak ada, skip" | tee report/extract-log.txt; exit 0; }
           for f in wad/*.wad_psp2; do
             n=$(basename "$f" .wad_psp2)
             mkdir -p "out/$n"
-            echo "### $n" >> report/extract-log.txt
-            ./wadunpack "$f" "out/$n" >> report/extract-log.txt 2>&1 \
-              || echo "GAGAL: $n" >> report/extract-log.txt
+            echo "### $n (urutan: file dir)" >> report/extract-log.txt
+            ./wadunpack "$f" "out/$n" >> report/extract-log.txt 2>&1 || true
+            if [ -z "$(ls -A "out/$n")" ]; then
+              echo "### $n (urutan: dir file)" >> report/extract-log.txt
+              ./wadunpack "out/$n" "$f" >> report/extract-log.txt 2>&1 || true
+            fi
+            if [ -z "$(ls -A "out/$n")" ]; then
+              echo "GAGAL/KOSONG: $n" >> report/extract-log.txt
+            else
+              echo "OK: $n" >> report/extract-log.txt
+            fi
           done
+          find out -type f | wc -l | tee report/jumlah-hasil.txt
 
       - uses: actions/upload-artifact@v4
         if: always()
