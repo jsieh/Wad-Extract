@@ -26,7 +26,7 @@ jobs:
       # Laporan header: dipakai untuk menganalisis format kalau tool gagal
       - name: Inspeksi header
         run: |
-          for f in wad/*.wad_psp2; do
+          for f in *wad_psp2; do
             echo "=== $f ($(stat -c %s "$f") bytes) ==="
             xxd "$f" | head -n 16
             echo "--- strings ---"
@@ -47,8 +47,8 @@ jobs:
       - name: Coba ekstrak
         continue-on-error: true
         run: |
-          for f in wad/*.wad_psp2; do
-            n=$(basename "$f" .wad_psp2)
+          for f in wad/*wad_psp2; do
+            n=$(basename "$f" wad_psp2)
             mkdir -p "out/$n"
             echo "### $n" >> report/extract-log.txt
             ./wadunpack "$f" "out/$n" >> report/extract-log.txt 2>&1 \
