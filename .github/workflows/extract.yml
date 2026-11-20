@@ -13,14 +13,20 @@ jobs:
         with:
           go-version: stable
 
-      # File boleh di root repo, di folder wad/, atau di dalam wad.zip
+      - name: Diagnosa
+        run: |
+          echo "Branch: $(git branch --show-current)"
+          ls -la
+          find . -path ./.git -prune -o -type f -print | head -n 100
+
       - name: Siapkan input
         run: |
           mkdir -p wad report out
           if [ -f wad.zip ]; then unzip -oj wad.zip -d wad; fi
-          cp -n ./*.wad_psp2 wad/ 2>/dev/null || true
+          find . -path ./wad -prune -o -path ./.git -prune -o -type f -iname '*.wad_psp2' -print0 \
+            | xargs -0 -r -I{} cp -n "{}" wad/
           ls -l wad | tee report/file-list.txt
-          count=$(ls wad/*.wad_psp2 2>/dev/null | wc -l)
+          count=$(find wad -type f -iname '*.wad_psp2' | wc -l)
           echo "Jumlah file .wad_psp2: $count"
           [ "$count" -gt 0 ] || { echo "Tidak ada file .wad_psp2"; exit 1; }
 
@@ -34,7 +40,7 @@ jobs:
             echo
           done > report/inspect.txt
 
-      - name: Build wadunpack (god_of_war_browser)
+      - name: Build wadunpack
         continue-on-error: true
         run: |
           git clone --depth 1 https://github.com/mogaika/god_of_war_browser.git gowb
@@ -45,7 +51,6 @@ jobs:
           ls -l wadunpack || echo "wadunpack TIDAK terbuild" | tee -a report/build-log.txt
           ./wadunpack -h 2>&1 | tee report/wadunpack-help.txt || true
 
-      # Coba dua urutan argumen, simpan semua output ke log
       - name: Coba ekstrak
         continue-on-error: true
         run: |
@@ -53,10 +58,10 @@ jobs:
           for f in wad/*.wad_psp2; do
             n=$(basename "$f" .wad_psp2)
             mkdir -p "out/$n"
-            echo "### $n (urutan: file dir)" >> report/extract-log.txt
+            echo "### $n (file dir)" >> report/extract-log.txt
             ./wadunpack "$f" "out/$n" >> report/extract-log.txt 2>&1 || true
             if [ -z "$(ls -A "out/$n")" ]; then
-              echo "### $n (urutan: dir file)" >> report/extract-log.txt
+              echo "### $n (dir file)" >> report/extract-log.txt
               ./wadunpack "out/$n" "$f" >> report/extract-log.txt 2>&1 || true
             fi
             if [ -z "$(ls -A "out/$n")" ]; then
