@@ -24,73 +24,45 @@ jobs:
           echo "Jumlah file .wad_psp2: $count"
           [ "$count" -gt 0 ] || { echo "Tidak ada file .wad_psp2"; exit 1; }
 
-      - name: Inspeksi header
-        run: |
-          for f in wad/*.wad_psp2; do
-            echo "=== $f ($(stat -c %s "$f") bytes) ==="
-            xxd "$f" | head -n 16
-            echo "--- strings ---"
-            strings -n 6 "$f" | head -n 20
-            echo
-          done > report/inspect.txt
-
-      - name: Build wadunpack
-        continue-on-error: true
+      - name: Build tools
         run: |
           git clone --depth 1 https://github.com/mogaika/god_of_war_browser.git gowb
           cd gowb
-          ls -R tools | tee ../report/tools-list.txt
-          go build -o ../wadunpack ./tools/wadunpack 2>&1 | tee ../report/build-log.txt
+          go build -o ../wadunpack ./tools/wadunpack
+          go build -o ../gowb-server .
           cd ..
-          ls -l wadunpack || echo "wadunpack TIDAK terbuild" | tee -a report/build-log.txt
-          ./wadunpack -h 2>&1 | tee report/wadunpack-help.txt || true
+          ls -l wadunpack gowb-server
 
-      - name: Coba ekstrak
+      - name: Ekstrak dengan wadunpack
         continue-on-error: true
         run: |
-          [ -x ./wadunpack ] || { echo "wadunpack tidak ada, skip" | tee report/extract-log.txt; exit 0; }
           for f in wad/*.wad_psp2; do
             n=$(basename "$f" .wad_psp2)
             mkdir -p "out/$n"
-            echo "### $n (file dir)" >> report/extract-log.txt
-            ./wadunpack "$f" "out/$n" >> report/extract-log.txt 2>&1 || true
-            if [ -z "$(ls -A "out/$n")" ]; then
-              echo "### $n (dir file)" >> report/extract-log.txt
-              ./wadunpack "out/$n" "$f" >> report/extract-log.txt 2>&1 || true
-            fi
-            if [ -z "$(ls -A "out/$n")" ]; then
-              echo "GAGAL/KOSONG: $n" >> report/extract-log.txt
-            else
-              echo "OK: $n" >> report/extract-log.txt
-            fi
+            echo "### $n" >> report/extract-log.txt
+            ./wadunpack -wad "$f" -out "out/$n" >> report/extract-log.txt 2>&1 || echo "GAGAL: $n" >> report/extract-log.txt
           done
           find out -type f | wc -l | tee report/jumlah-hasil.txt
-          find out -type f | head -n 200 > report/daftar-hasil.txt
+          find out -type f | head -n 300 > report/daftar-hasil.txt
+          du -sh out | tee -a report/jumlah-hasil.txt
 
       - name: Jalankan browser server (discovery)
         continue-on-error: true
         run: |
-          [ -d gowb ] || git clone --depth 1 https://github.com/mogaika/god_of_war_browser.git gowb
-          cd gowb
-          go list -f '{{.Name}} {{.Dir}}' ./... | grep '^main' | tee ../report/main-packages.txt || true
-          grep -rn "HandleFunc\|\.Handle(" --include=*.go . > ../report/endpoints.txt || true
-          go build -o ../gowb-server . 2>&1 | tee ../report/gowb-build.txt || true
-          cd ..
-          [ -x ./gowb-server ] || { echo "gowb-server tidak terbuild"; exit 0; }
-
           mkdir -p wadrun
           for f in wad/*.wad_psp2; do
             n=$(basename "$f" .wad_psp2 | tr a-z A-Z)
             cp "$f" "wadrun/$n.WAD"
           done
-          ls -l wadrun | tee report/wadrun-list.txt
-
+          cd gowb
           for v in 1 2; do
-            ./gowb-server -dir wadrun -ps psvita -gowversion $v -i 127.0.0.1:8000 > report/server-v$v.log 2>&1 &
+            ../gowb-server -dir ../wadrun -ps psvita -gowversion $v -i 127.0.0.1:8000 > ../report/server-v$v.log 2>&1 &
             pid=$!
             sleep 8
-            curl -s http://127.0.0.1:8000/ -o report/index-v$v.html || true
-            curl -s http://127.0.0.1:8000/api/ -o report/api-v$v.txt || true
+            curl -s http://127.0.0.1:8000/ -o ../report/index-v$v.html || true
+            curl -s http://127.0.0.1:8000/json/fs -o ../report/fs-v$v.json || true
+            curl -s http://127.0.0.1:8000/json/pack -o ../report/pack-v$v.json || true
+            curl -s http://127.0.0.1:8000/json/pack/R_WEAPON0_0.WAD -o ../report/pack-weapon0_0-v$v.json || true
             kill $pid 2>/dev/null || true
             sleep 2
           done
