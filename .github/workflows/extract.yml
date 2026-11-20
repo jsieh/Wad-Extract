@@ -13,12 +13,6 @@ jobs:
         with:
           go-version: stable
 
-      - name: Diagnosa
-        run: |
-          echo "Branch: $(git branch --show-current)"
-          ls -la
-          find . -path ./.git -prune -o -type f -print | head -n 100
-
       - name: Siapkan input
         run: |
           mkdir -p wad report out
@@ -71,20 +65,19 @@ jobs:
             fi
           done
           find out -type f | wc -l | tee report/jumlah-hasil.txt
+          find out -type f | head -n 200 > report/daftar-hasil.txt
 
-                - name: Jalankan browser server (discovery)
+      - name: Jalankan browser server (discovery)
         continue-on-error: true
         run: |
+          [ -d gowb ] || git clone --depth 1 https://github.com/mogaika/god_of_war_browser.git gowb
           cd gowb
-          # cari package main
-          go list -f '{{.Name}} {{.Dir}}' ./... | grep '^main' | tee ../report/main-packages.txt
-          # daftar endpoint HTTP dari source
+          go list -f '{{.Name}} {{.Dir}}' ./... | grep '^main' | tee ../report/main-packages.txt || true
           grep -rn "HandleFunc\|\.Handle(" --include=*.go . > ../report/endpoints.txt || true
           go build -o ../gowb-server . 2>&1 | tee ../report/gowb-build.txt || true
           cd ..
           [ -x ./gowb-server ] || { echo "gowb-server tidak terbuild"; exit 0; }
 
-          # -dir biasanya mengharapkan nama .WAD huruf besar
           mkdir -p wadrun
           for f in wad/*.wad_psp2; do
             n=$(basename "$f" .wad_psp2 | tr a-z A-Z)
