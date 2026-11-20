@@ -72,6 +72,36 @@ jobs:
           done
           find out -type f | wc -l | tee report/jumlah-hasil.txt
 
+                - name: Jalankan browser server (discovery)
+        continue-on-error: true
+        run: |
+          cd gowb
+          # cari package main
+          go list -f '{{.Name}} {{.Dir}}' ./... | grep '^main' | tee ../report/main-packages.txt
+          # daftar endpoint HTTP dari source
+          grep -rn "HandleFunc\|\.Handle(" --include=*.go . > ../report/endpoints.txt || true
+          go build -o ../gowb-server . 2>&1 | tee ../report/gowb-build.txt || true
+          cd ..
+          [ -x ./gowb-server ] || { echo "gowb-server tidak terbuild"; exit 0; }
+
+          # -dir biasanya mengharapkan nama .WAD huruf besar
+          mkdir -p wadrun
+          for f in wad/*.wad_psp2; do
+            n=$(basename "$f" .wad_psp2 | tr a-z A-Z)
+            cp "$f" "wadrun/$n.WAD"
+          done
+          ls -l wadrun | tee report/wadrun-list.txt
+
+          for v in 1 2; do
+            ./gowb-server -dir wadrun -ps psvita -gowversion $v -i 127.0.0.1:8000 > report/server-v$v.log 2>&1 &
+            pid=$!
+            sleep 8
+            curl -s http://127.0.0.1:8000/ -o report/index-v$v.html || true
+            curl -s http://127.0.0.1:8000/api/ -o report/api-v$v.txt || true
+            kill $pid 2>/dev/null || true
+            sleep 2
+          done
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
