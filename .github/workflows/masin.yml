@@ -2,6 +2,7 @@
 # Jalankan dari tab Actions -> "Download & compress UFE3 (PS2)" -> Run workflow
 #
 # Secret opsional: DL_HEADER  (mis. "Authorization: Bearer xxx" kalau link-nya private)
+# Link MediaFire halaman biasa (mediafire.com/file/...) sudah didukung otomatis.
 
 name: Download & compress UFE3 (PS2)
 
@@ -9,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       url:
-        description: Link download LANGSUNG ke ISO (atau zip/7z/rar yang isinya ISO) dump disc lu sendiri
+        description: Link download ke ISO (atau zip/7z/rar yang isinya ISO). MediaFire boleh link halaman biasa
         required: true
         type: string
       format:
@@ -49,9 +50,10 @@ jobs:
           sudo apt-get install -y mame-tools p7zip-full
           sudo apt-get install -y unrar || true
 
-            - name: Download
+      - name: Download
         env:
           URL: ${{ inputs.url }}
+          DL_HEADER: ${{ secrets.DL_HEADER }}
         run: |
           mkdir -p dl && cd dl
           UA='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36'
@@ -76,10 +78,12 @@ jobs:
             fi
             URL="$DIRECT"
           fi
-          curl -fLJO -A "$UA" --retry 5 --retry-delay 5 "$URL"
+          args=(-fLJO -A "$UA" --retry 5 --retry-delay 5)
+          if [ -n "${DL_HEADER:-}" ]; then args+=(-H "$DL_HEADER"); fi
+          curl "${args[@]}" "$URL"
           echo "FILE=$(ls | head -n1)" >> "$GITHUB_ENV"
           ls -lh
-          
+
       - name: Siapin ISO
         run: |
           shopt -s nocasematch
