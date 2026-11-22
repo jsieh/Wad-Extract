@@ -49,18 +49,37 @@ jobs:
           sudo apt-get install -y mame-tools p7zip-full
           sudo apt-get install -y unrar || true
 
-      - name: Download
+            - name: Download
         env:
           URL: ${{ inputs.url }}
-          DL_HEADER: ${{ secrets.DL_HEADER }}
         run: |
           mkdir -p dl && cd dl
-          args=(-fLJO --retry 5 --retry-delay 5)
-          if [ -n "${DL_HEADER:-}" ]; then args+=(-H "$DL_HEADER"); fi
-          curl "${args[@]}" "$URL"
+          UA='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36'
+          if [[ "$URL" == *mediafire.com* ]]; then
+            curl -sL -A "$UA" "$URL" -o page.html
+            DIRECT="$(python3 - <<'PY'
+          import re, base64
+          h = open('page.html', encoding='utf-8', errors='ignore').read()
+          m = re.search(r'data-scrambled-url="([^"]+)"', h)
+          if m:
+              print(base64.b64decode(m.group(1)).decode())
+          else:
+              m = re.search(r'href="(https?://download[^"]+mediafire\.com[^"]+)"', h)
+              if m:
+                  print(m.group(1))
+          PY
+          )"
+            rm -f page.html
+            if [ -z "$DIRECT" ]; then
+              echo "::error::Link asli MediaFire nggak ketemu (file dihapus / link expired / diblok captcha)"
+              exit 1
+            fi
+            URL="$DIRECT"
+          fi
+          curl -fLJO -A "$UA" --retry 5 --retry-delay 5 "$URL"
           echo "FILE=$(ls | head -n1)" >> "$GITHUB_ENV"
           ls -lh
-
+          
       - name: Siapin ISO
         run: |
           shopt -s nocasematch
