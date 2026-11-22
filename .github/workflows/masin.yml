@@ -1,0 +1,217 @@
+# Simpan sebagai: .github/workflows/compress-ufe3-ps2.yml  (pakai repo PRIVATE)
+# Jalankan dari tab Actions -> "Download & compress UFE3 (PS2)" -> Run workflow
+#
+# Secret opsional: DL_HEADER  (mis. "Authorization: Bearer xxx" kalau link-nya private)
+
+name: Download & compress UFE3 (PS2)
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: Link download LANGSUNG ke ISO (atau zip/7z/rar yang isinya ISO) dump disc lu sendiri
+        required: true
+        type: string
+      format:
+        description: chd = langsung bisa dibaca PCSX2, 7z = harus di-extract dulu
+        type: choice
+        options: [chd, 7z]
+        default: chd
+      zero_patterns:
+        description: Pola file di DALAM ISO yang dikosongin (kosongin kolom ini = lossless)
+        type: string
+        default: "*.PSS,*.SFD,*.MPG,*.MPEG,*.M2V,*.STR,*.PMF"
+      list_only:
+        description: Cuma tampilin 40 file terbesar di ISO (buat milih pola), tanpa kompres
+        type: boolean
+        default: false
+      target_mb:
+        description: Target ukuran akhir (MB), cuma buat warning
+        type: string
+        default: "900"
+
+permissions:
+  contents: read
+
+jobs:
+  compress:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Lega-in disk runner
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mame-tools p7zip-full
+          sudo apt-get install -y unrar || true
+
+      - name: Download
+        env:
+          URL: ${{ inputs.url }}
+          DL_HEADER: ${{ secrets.DL_HEADER }}
+        run: |
+          mkdir -p dl && cd dl
+          args=(-fLJO --retry 5 --retry-delay 5)
+          if [ -n "${DL_HEADER:-}" ]; then args+=(-H "$DL_HEADER"); fi
+          curl "${args[@]}" "$URL"
+          echo "FILE=$(ls | head -n1)" >> "$GITHUB_ENV"
+          ls -lh
+
+      - name: Siapin ISO
+        run: |
+          shopt -s nocasematch
+          if [[ "$FILE" == *.iso ]]; then
+            mv "dl/$FILE" game.iso
+          else
+            7z x -y -bso0 -bsp0 "dl/$FILE" -oextract
+            ISO="$(find extract -type f -iname '*.iso' -printf '%s %p\n' | sort -nr | head -n1 | cut -d' ' -f2-)"
+            if [ -z "$ISO" ]; then
+              echo "::error::Nggak nemu .iso di dalam arsip (format bin/cue belum didukung)"
+              exit 1
+            fi
+            mv "$ISO" game.iso
+          fi
+          rm -rf dl extract
+          echo "ISO_BYTES=$(stat -c%s game.iso)" >> "$GITHUB_ENV"
+          ls -lh game.iso
+
+      - name: Tulis isotool.py (parser ISO9660, tanpa dependency)
+        run: |
+          cat > isotool.py <<'PY'
+          #!/usr/bin/env python3
+          """list / zero file di dalam ISO9660 tanpa mengubah layout (LBA tetap sama)."""
+          import fnmatch, struct, sys
+
+          SEC = 2048
+
+
+          def walk(f, lba, length, path, out, seen):
+              if lba in seen:
+                  return
+              seen.add(lba)
+              f.seek(lba * SEC)
+              data = f.read(length)
+              pos = 0
+              while pos < len(data):
+                  rl = data[pos]
+                  if rl == 0:  # padding sampai sektor berikutnya
+                      pos = (pos // SEC + 1) * SEC
+                      continue
+                  rec = data[pos:pos + rl]
+                  pos += rl
+                  ext = struct.unpack_from('<I', rec, 2)[0]
+                  size = struct.unpack_from('<I', rec, 10)[0]
+                  flags = rec[25]
+                  name = rec[33:33 + rec[32]]
+                  if name in (b'\x00', b'\x01'):
+                      continue
+                  p = path + '/' + name.decode('ascii', 'replace').split(';')[0]
+                  if flags & 2:
+                      walk(f, ext, size, p, out, seen)
+                  else:
+                      out.append((p, ext, size))
+
+
+          def scan(f):
+              f.seek(16 * SEC)
+              pvd = f.read(SEC)
+              if pvd[1:6] != b'CD001':
+                  sys.exit('::error::Bukan ISO9660 yang valid (PVD nggak ketemu)')
+              root = pvd[156:190]
+              out = []
+              walk(f, struct.unpack_from('<I', root, 2)[0],
+                   struct.unpack_from('<I', root, 10)[0], '', out, set())
+              return out
+
+
+          def main():
+              cmd, iso = sys.argv[1], sys.argv[2]
+              if cmd == 'list':
+                  with open(iso, 'rb') as f:
+                      files = scan(f)
+                  print('%d file, total %.0f MB' % (len(files), sum(s for _, _, s in files) / 1048576))
+                  for p, lba, s in sorted(files, key=lambda x: -x[2])[:40]:
+                      print('%9.1f MB  LBA %-8d %s' % (s / 1048576, lba, p))
+              elif cmd == 'zero':
+                  pats = [x.strip().upper() for x in sys.argv[3].split(',') if x.strip()]
+                  total = 0
+                  with open(iso, 'r+b') as f:
+                      for p, lba, s in scan(f):
+                          if any(fnmatch.fnmatch(p.upper(), pat) or fnmatch.fnmatch(p.upper().split('/')[-1], pat) for pat in pats):
+                              f.seek(lba * SEC)
+                              left = s
+                              while left > 0:
+                                  n = min(left, 1 << 20)
+                                  f.write(bytes(n))
+                                  left -= n
+                              total += s
+                              print('dinolkan %9.1f MB  %s' % (s / 1048576, p))
+                  print('TOTAL dinolkan: %.0f MB' % (total / 1048576))
+              else:
+                  sys.exit('pakai: isotool.py list|zero ISO [pola,pola]')
+
+
+          main()
+          PY
+
+      - name: Isi ISO (file terbesar)
+        run: |
+          {
+            echo '### 40 file terbesar di dalam ISO'
+            echo '```'
+            python3 isotool.py list game.iso
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Nol-in file sesuai pola
+        if: ${{ !inputs.list_only && inputs.zero_patterns != '' }}
+        env:
+          PATTERNS: ${{ inputs.zero_patterns }}
+        run: python3 isotool.py zero game.iso "$PATTERNS"
+
+      - name: Kompres
+        if: ${{ !inputs.list_only }}
+        env:
+          FORMAT: ${{ inputs.format }}
+        run: |
+          mkdir -p out
+          if [ "$FORMAT" = "chd" ]; then
+            chdman createdvd -i game.iso -o out/UFE3.chd -np "$(nproc)"
+            chdman verify -i out/UFE3.chd
+          else
+            7z a -t7z -m0=lzma2 -mx=9 -md=256m -mfb=273 -mmt=2 -ms=on out/UFE3.iso.7z game.iso
+            7z t out/UFE3.iso.7z | tail -n 3
+          fi
+          ls -lh out
+
+      - name: Ringkasan
+        if: ${{ !inputs.list_only }}
+        env:
+          TARGET: ${{ inputs.target_mb }}
+        run: |
+          NEW="$(stat -c%s out/UFE3.*)"
+          {
+            echo "### Hasil kompresi UFE3 (PS2)"
+            echo "| | Ukuran |"
+            echo "|---|---|"
+            echo "| ISO asli | $((ISO_BYTES/1024/1024)) MB |"
+            echo "| Hasil | $((NEW/1024/1024)) MB |"
+            echo "| Rasio | $(( 100*NEW/ISO_BYTES ))% |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ $((NEW/1024/1024)) -gt "$TARGET" ]; then
+            echo "::warning::Hasil $((NEW/1024/1024)) MB masih di atas target ${TARGET} MB. Jalankan sekali dengan list_only=true, lihat file terbesar, lalu tambah pola di zero_patterns."
+          fi
+
+      - name: Upload artifact
+        if: ${{ !inputs.list_only }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ufe3-compressed
+          path: out/*
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
